@@ -997,9 +997,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               enemy.setVelocity(Math.cos(angle) * 50, Math.sin(angle) * 50)
             }
 
-            // Firing: Solo mode OR Creator in multiplayer (REPLICAS DON'T FIRE)
-            const canFire = this.mode === "SOLO" || this.isCreator
-            if (canFire && Math.random() < 0.015 && this.enemyBullets) { // Increased fire rate
+            // Firing: Simulation on ALL clients ensures players see projectiles and take damage locally
+            if (this.enemyBullets && Math.random() < 0.015) { // Increased fire rate
               const bullet = this.enemyBullets.create(enemy.x, enemy.y + 20, "enemyBullet")
               bullet.setVelocityY(400) // Much faster
               bullet.setDisplaySize(8, 8)
@@ -1132,9 +1131,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               }
             }
 
-            // Offensive Power: ONLY CREATOR/SOLO controls boss projectiles
-            const canFire = this.mode === "SOLO" || this.isCreator
-            if (canFire && now - lastPower > powerCooldown) {
+            // Offensive Power: Simulations on ALL clients ensures hit detection works locally
+            if (now - lastPower > powerCooldown) {
               boss.setData("lastPower", now)
 
               if (bossType === "VOID_LEVIATHAN") {
@@ -1197,30 +1195,22 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                 }
               } else if (bossType === "VOID_PHANTOM") {
                 // Teleport (Authoritative) and Snipe (Independent)
-                if (this.mode === "SOLO" || this.isCreator) {
-                  this.tweens.add({
-                    targets: boss,
-                    alpha: 0,
-                    duration: 150,
-                    onComplete: () => {
-                      boss.x = Phaser.Math.Between(100, this.cameras.main.width - 100)
-                      boss.y = Phaser.Math.Between(50, 150)
-                      this.tweens.add({ targets: boss, alpha: 1, duration: 150 })
-                      const bullet = this.enemyBullets!.create(boss.x, boss.y, "enemyBullet")
-                      if (this.player && this.player.active) {
-                         this.physics.moveToObject(bullet, this.player!, 800)
-                      }
+                this.tweens.add({
+                  targets: boss,
+                  alpha: 0,
+                  duration: 150,
+                  onComplete: () => {
+                    if (this.mode === "SOLO" || this.isCreator) {
+                        boss.x = Phaser.Math.Between(100, this.cameras.main.width - 100)
+                        boss.y = Phaser.Math.Between(50, 150)
                     }
-                  })
-                } else {
-                  // Non-creator: Wait for sync coordinates and fire
-                  this.time.delayedCall(300, () => {
-                    if (boss.active && this.player && this.player.active) {
-                      const bullet = this.enemyBullets!.create(boss.x, boss.y, "enemyBullet")
-                      this.physics.moveToObject(bullet, this.player!, 800)
+                    this.tweens.add({ targets: boss, alpha: 1, duration: 150 })
+                    const bullet = this.enemyBullets!.create(boss.x, boss.y, "enemyBullet")
+                    if (this.player && this.player.active) {
+                        this.physics.moveToObject(bullet, this.player!, 800)
                     }
-                  })
-                }
+                  }
+                })
               }
             }
           })
@@ -1289,6 +1279,15 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (!this.shipStats) return
 
           const damage = this.shipStats.firepower
+          const isAuthoritative = this.mode === "SOLO" || this.isCreator
+
+          if (!isAuthoritative) {
+            // Non-creator: Visual only
+            bullet.destroy()
+            this.createExplosion(boss.x, boss.y, 0xba55d3)
+            return
+          }
+
           const bossHealth = (boss.getData("health") || 200) - damage
 
           if (bossHealth <= 0) {
