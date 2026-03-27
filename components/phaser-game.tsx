@@ -85,7 +85,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         private remoteSprites: Map<string, Phaser.Physics.Arcade.Sprite> = new Map()
         private remoteHealthBars: Map<string, { bg: Phaser.GameObjects.Rectangle, fill: Phaser.GameObjects.Rectangle }> = new Map()
         private remotePlayerBuffer: Map<string, { ts: number; x: number; y: number; health: number; shipType?: string; bullets?: any[] }[]> = new Map()
-        private enemyBuffer: Map<string, { ts: number; x: number; y: number; health: number; type: "enemy" | "boss"; bossType?: string }[]> = new Map()
+        private enemyBuffer: Map<string, { ts: number; x: number; y: number; health: number; maxHealth: number; type: "enemy" | "boss"; bossType?: string }[]> = new Map()
         private readonly interpDelayMs = 150
         private ably?: Ably.Realtime
         private ablyChannel?: any // Using any to avoid complex type issues with Ably 2.x for now
@@ -172,11 +172,10 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           this.input.keyboard!.on("keydown-SPACE", () => this.fireBullet(this.player))
 
 
-          const canAuthoritativeCombat = this.mode === "SOLO" || this.isCreator
-          if (canAuthoritativeCombat && this.bullets && this.enemies) {
+          if (this.bullets && this.enemies) {
             this.physics.add.overlap(this.bullets, this.enemies, this.hitEnemy as any, undefined, this)
           }
-          if (canAuthoritativeCombat && this.bullets && this.bosses) {
+          if (this.bullets && this.bosses) {
             this.physics.add.overlap(this.bullets, this.bosses, this.hitBoss as any, undefined, this)
           }
           
@@ -476,12 +475,12 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (this.enemies) {
             this.enemies.getChildren().forEach((e: any) => {
               if (e.active) {
-                // Round coordinates to reduce packet size string representation
                 result.push({ 
                   id: this.getEnemyId(e), 
                   x: Math.round(e.x), 
                   y: Math.round(e.y), 
-                  h: e.getData('health') || 30 // Shortened key 'h' for health
+                  h: e.getData('health') || 30,
+                  mh: e.getData('maxHealth') || 30
                 })
               }
             })
@@ -494,8 +493,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                   x: Math.round(b.x), 
                   y: Math.round(b.y), 
                   h: b.getData('health') || 300, 
-                  t: 'boss', // Shortened key 't' for type
-                  bt: b.getData('bossType') // Shortened key 'bt' for bossType
+                  mh: b.getData('maxHealth') || 300,
+                  t: 'boss', 
+                  bt: b.getData('bossType')
                 })
               }
             })
@@ -541,10 +541,14 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             }
 
             const health = se.h || 0
+            const maxHealth = se.mh || 30
             local.setData('health', health)
+            local.setData('maxHealth', maxHealth)
+            local.setData('type', se.t || 'enemy') // Store type for health bar lookup
+            local.setData('bossType', se.bt)
 
             const buf = this.enemyBuffer.get(se.id) || []
-            buf.push({ ts, x: se.x, y: se.y, health: health, type: se.t || 'enemy', bossType: se.bt })
+            buf.push({ ts, x: se.x, y: se.y, health: health, maxHealth: maxHealth, type: se.t || 'enemy', bossType: se.bt })
             const cutoff = ts - 2000
             while (buf.length > 0 && buf[0].ts < cutoff) buf.shift()
             if (buf.length > 1 && buf[buf.length - 2].ts > buf[buf.length - 1].ts) {
@@ -554,7 +558,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           })
         }
 
-        private updateRemoteHealthBar(addr: string, x: number, y: number, health: number) {
+        private updateRemoteHealthBar(addr: string, x: number, y: number, health: number, maxHealth: number = 100) {
           let bars = this.remoteHealthBars.get(addr)
           if (!bars) {
             const bg = this.add.rectangle(x, y - 35, 44, 6, 0x000000).setDepth(1000)
@@ -563,11 +567,12 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             this.remoteHealthBars.set(addr, bars)
           }
 
+          const pct = Math.max(0, Math.min(1, health / maxHealth))
           bars.bg.setPosition(x, y - 35)
-          bars.fill.setPosition(x - (20 * (1 - health / 100)), y - 35)
-          bars.fill.width = Math.max(0, 40 * (health / 100))
+          bars.fill.setPosition(x - (20 * (1 - pct)), y - 35)
+          bars.fill.setSize(Math.round(40 * pct), 4) // Use setSize for Phaser rectangles
           
-          const color = health > 60 ? 0x22d3ee : health > 30 ? 0xfbbf24 : 0xef4444
+          const color = pct > 0.6 ? 0x22d3ee : pct > 0.3 ? 0xfbbf24 : 0xef4444
           bars.fill.setFillStyle(color)
         }
 
@@ -657,8 +662,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               if (sample) {
                 this.lerpOrSnap(sprite, sample.x, sample.y, 0.35)
                 // Sync health bar with interpolated position
-                const health = buf[buf.length - 1].health
-                this.updateRemoteHealthBar(addr, sprite.x, sprite.y, health)
+                const latest = buf[buf.length - 1]
+                const maxH = this.getShipStats(latest.shipType || "viper").maxHealth
+                this.updateRemoteHealthBar(addr, sprite.x, sprite.y, latest.health, maxH)
               }
             }
           })
@@ -675,7 +681,10 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               if (buf) {
                 const sample = this.sampleBuffer(buf, renderTs)
                 if (sample) {
-                  this.lerpOrSnap(enemy, sample.x, sample.y, 0.45) // Slightly faster lerp for enemies
+                  this.lerpOrSnap(enemy, sample.x, sample.y, 0.45) 
+                  // Sync health bar for enemies/bosses
+                  const latest: any = buf[buf.length - 1]
+                  this.updateRemoteHealthBar(id, enemy.x, enemy.y, latest.health, latest.maxHealth || 30)
                 }
               }
             })
@@ -703,8 +712,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           }
 
           // Update local floating health bar
-          if (this.player && this.player.active) {
-            this.updateRemoteHealthBar(this.account, this.player.x, this.player.y, this.health)
+          if (this.player && this.player.active && this.shipStats) {
+            this.updateRemoteHealthBar(this.account, this.player.x, this.player.y, this.health, this.shipStats.maxHealth)
           }
 
           if (this.health <= 0) {
@@ -988,7 +997,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               enemy.setVelocity(Math.cos(angle) * 50, Math.sin(angle) * 50)
             }
 
-            if (Math.random() < 0.015 && this.enemyBullets) { // Increased fire rate
+            // Firing: Solo mode OR Creator in multiplayer (REPLICAS DON'T FIRE)
+            const canFire = this.mode === "SOLO" || this.isCreator
+            if (canFire && Math.random() < 0.015 && this.enemyBullets) { // Increased fire rate
               const bullet = this.enemyBullets.create(enemy.x, enemy.y + 20, "enemyBullet")
               bullet.setVelocityY(400) // Much faster
               bullet.setDisplaySize(8, 8)
@@ -1121,8 +1132,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               }
             }
 
-            // Offensive Power
-            if (now - lastPower > powerCooldown) {
+            // Offensive Power: ONLY CREATOR/SOLO controls boss projectiles
+            const canFire = this.mode === "SOLO" || this.isCreator
+            if (canFire && now - lastPower > powerCooldown) {
               boss.setData("lastPower", now)
 
               if (bossType === "VOID_LEVIATHAN") {
@@ -1226,6 +1238,15 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (!this.shipStats) return
 
           const damage = this.shipStats.firepower
+          const isAuthoritative = this.mode === "SOLO" || this.isCreator
+          
+          if (!isAuthoritative) {
+            // Non-creator: Just destroy bullet and show effect to feel responsive
+            bullet.destroy()
+            this.createExplosion(enemy.x, enemy.y, 0x00ffff)
+            return
+          }
+
           const enemyHealth = (enemy.getData("health") || 30) - damage
 
           if (enemyHealth <= 0) {
