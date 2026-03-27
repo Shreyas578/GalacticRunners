@@ -1,0 +1,46 @@
+[package]
+name = "galactic_runners"
+version = "1.0.0"
+
+[[move.package]]
+id = "MoveStdlib"
+source = { git = "https://github.com/one-chain-labs/onechain.git", rev = "mainnet-v1.0.1", subdir = "crates/sui-framework/packages/move-stdlib" }
+
+[[move.package]]
+id = "One"
+source = { git = "https://github.com/one-chain-labs/onechain.git", rev = "mainnet-v1.0.1", subdir = "crates/sui-framework/packages/one-framework" }
+
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+]
+
+[move.toolchain-version]
+compiler-version = "1.0.1"
+edition = "2024"
+flavor = "one"
+
+[env]
+
+[env.testnet]
+chain-id = "1bd5c965"
+original-published-id = "0x514d92711951d421d7a94af7c350597d3d1368ca34eaa1203080634e8f065568"
+latest-published-id = "0x514d92711951d421d7a94af7c350597d3d1368ca34eaa1203080634e8f065568"
+published-version = "1"
+
+[addresses]
+galactic_runners = "0x5fe10e5563ebd93972474cd6496cd1e66762d4cff853b311d95d950f4907de3f"
+one = "0x0000000000000000000000000000000000000000000000000000000000000001"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/mainnet" }
+
+[dev-dependencies]
+
+[move]
+version = 3
+manifest_digest = "14BB17E486C716DED3F79C8B24F9A03C0B2993D97EEFBB032227D494B6776ECE"
+deps_digest = "3C4103934B1E040BB6B23F1D610B4EF9F2F1166A50A104EADCF77467C004C600"
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+  { id = "One", name = "One" },
+]

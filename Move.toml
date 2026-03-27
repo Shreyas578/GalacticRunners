@@ -1,0 +1,17 @@
+[package]
+name = "galactic_runners"
+version = "1.0.0"
+
+[addresses]
+galactic_runners = "0x0a784b7266d2725db744b69fdd647466a66e0a2c6e054d02a11bddc6a1e01ba2"
+std = "0x1"
+# Address placeholder for the OneChain framework / standard library.
+# Replace this with the actual published address of the OneChain modules
+# on your network if it differs.
+one = "0x2"
+
+[dependencies]
+One = { git = "https://github.com/one-chain-labs/onechain.git", subdir = "crates/sui-framework/packages/one-framework", rev = "mainnet-v1.0.1" }
+MoveStdlib = { git = "https://github.com/one-chain-labs/onechain.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "mainnet-v1.0.1" }
+
+[dev-dependencies]
