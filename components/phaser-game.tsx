@@ -84,6 +84,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         private enemyMap: Map<string, any> = new Map()
         private remoteSprites: Map<string, Phaser.Physics.Arcade.Sprite> = new Map()
         private remoteHealthBars: Map<string, { bg: Phaser.GameObjects.Rectangle, fill: Phaser.GameObjects.Rectangle }> = new Map()
+        private remotePlayerBuffer: Map<string, { ts: number; x: number; y: number; health: number; shipType?: string; bullets?: any[] }[]> = new Map()
+        private enemyBuffer: Map<string, { ts: number; x: number; y: number; health: number; type: "enemy" | "boss"; bossType?: string }[]> = new Map()
+        private readonly interpDelayMs = 150
         private ably?: Ably.Realtime
         private ablyChannel?: Ably.Types.RealtimeChannelPromise
         private usingHttpFallback = false
@@ -239,18 +242,29 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             if (data.playerState && data.sender) {
               const ps = data.playerState
               const addr = data.sender
+              const ts = typeof data.ts === "number" ? data.ts : Date.now()
+
               if (!this.remoteSprites.has(addr)) {
                 const sprite = this.physics.add.sprite(ps.x, ps.y, `player_${ps.shipType || "viper"}`)
                 sprite.setDisplaySize(50, 50)
                 sprite.setAlpha(0.6)
                 sprite.setTint(0x00ffff)
-                sprite.setData("lastNetAt", Date.now())
                 this.remoteSprites.set(addr, sprite)
               }
               const sprite = this.remoteSprites.get(addr)!
-              sprite.setData("targetX", ps.x)
-              sprite.setData("targetY", ps.y)
               sprite.setData("lastNetAt", Date.now())
+
+              const buf = this.remotePlayerBuffer.get(addr) || []
+              buf.push({ ts, x: ps.x, y: ps.y, health: ps.health, shipType: ps.shipType, bullets: ps.bullets })
+              // keep buffer bounded
+              const cutoff = ts - 2000
+              while (buf.length > 0 && buf[0].ts < cutoff) buf.shift()
+              // Ably ordering is usually preserved; keep monotonic safety
+              if (buf.length > 1 && buf[buf.length - 2].ts > buf[buf.length - 1].ts) {
+                buf.sort((a, b) => a.ts - b.ts)
+              }
+              this.remotePlayerBuffer.set(addr, buf)
+
               this.updateRemoteHealthBar(addr, ps.x, ps.y, ps.health)
 
               if (ps.bullets) {
@@ -265,7 +279,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
 
             // Enemy state comes only from creator
             if (!this.isCreator && data.enemies) {
-              this.applyServerEnemies(data.enemies, data.wave)
+              const ts = typeof data.ts === "number" ? data.ts : Date.now()
+              this.applyServerEnemies(data.enemies, data.wave, ts)
             }
           })
 
@@ -407,7 +422,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             }
 
             if (!this.isCreator && gameState.enemies) {
-              this.applyServerEnemies(gameState.enemies, gameState.wave)
+              const ts = typeof gameState.lastUpdate === "number" ? gameState.lastUpdate : Date.now()
+              this.applyServerEnemies(gameState.enemies, gameState.wave, ts)
             }
           } catch { }
         }
@@ -490,7 +506,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           return result
         }
 
-        private applyServerEnemies(serverEnemies: any[], serverWave: number) {
+        private applyServerEnemies(serverEnemies: any[], serverWave: number, ts: number) {
           if (!this.enemies || !this.bosses) return
           if (serverWave && serverWave !== this.wave) {
             this.wave = serverWave
@@ -504,6 +520,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             if (!serverIds.has(id)) {
               local.destroy()
               this.enemyMap.delete(id)
+              this.enemyBuffer.delete(id)
             }
           })
 
@@ -525,10 +542,16 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               this.enemyMap.set(se.id, local)
             }
 
-            // Set target position for lerp in update()
-            local.setData('targetX', se.x)
-            local.setData('targetY', se.y)
             local.setData('health', se.health)
+
+            const buf = this.enemyBuffer.get(se.id) || []
+            buf.push({ ts, x: se.x, y: se.y, health: se.health, type: se.type, bossType: se.bossType })
+            const cutoff = ts - 2000
+            while (buf.length > 0 && buf[0].ts < cutoff) buf.shift()
+            if (buf.length > 1 && buf[buf.length - 2].ts > buf[buf.length - 1].ts) {
+              buf.sort((a, b) => a.ts - b.ts)
+            }
+            this.enemyBuffer.set(se.id, buf)
           })
         }
 
@@ -547,6 +570,23 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           
           const color = health > 60 ? 0x22d3ee : health > 30 ? 0xfbbf24 : 0xef4444
           bars.fill.setFillStyle(color)
+        }
+
+        private sampleBuffer<T extends { ts: number; x: number; y: number }>(buf: T[], renderTs: number): { x: number; y: number } | null {
+          if (!buf || buf.length === 0) return null
+          if (buf.length === 1) return { x: buf[0].x, y: buf[0].y }
+
+          // advance from the front while next is still older than renderTs
+          while (buf.length >= 2 && buf[1].ts <= renderTs) buf.shift()
+
+          const a = buf[0]
+          const b = buf[1]
+          if (!b) return { x: a.x, y: a.y }
+          if (renderTs <= a.ts) return { x: a.x, y: a.y }
+          if (renderTs >= b.ts) return { x: b.x, y: b.y }
+
+          const t = (renderTs - a.ts) / Math.max(1, b.ts - a.ts)
+          return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
         }
 
         private lerpOrSnap(sprite: any, tx: number, ty: number, alpha: number) {
@@ -599,30 +639,34 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               }
           }
 
-          // Lerp remote players
+          const renderTs = Date.now() - this.interpDelayMs
+
+          // Smooth remote players using buffered interpolation
           this.remoteSprites.forEach((sprite, addr) => {
             if (!sprite.active || !sprite.scene) {
                 this.remoteSprites.delete(addr)
+                this.remotePlayerBuffer.delete(addr)
                 return
             }
-            const tx = sprite.getData('targetX')
-            const ty = sprite.getData('targetY')
-            if (tx !== undefined && ty !== undefined) {
-              this.lerpOrSnap(sprite, tx, ty, 0.22)
+            const buf = this.remotePlayerBuffer.get(addr)
+            if (buf) {
+              const sample = this.sampleBuffer(buf, renderTs)
+              if (sample) this.lerpOrSnap(sprite, sample.x, sample.y, 0.35)
             }
           })
 
-          // Lerp remote enemies (ONLY in MULTIPLAYER and for NON-CREATORS)
+          // Smooth remote enemies (ONLY in MULTIPLAYER and for NON-CREATORS)
           if (this.mode === "MULTIPLAYER" && !this.isCreator && this.enemyMap) {
             this.enemyMap.forEach((enemy, id) => {
               if (!enemy.active || !enemy.scene) {
                   this.enemyMap.delete(id)
+                  this.enemyBuffer.delete(id)
                   return
               }
-              const tx = enemy.getData('targetX')
-              const ty = enemy.getData('targetY')
-              if (tx !== undefined && ty !== undefined) {
-                this.lerpOrSnap(enemy, tx, ty, 0.2)
+              const buf = this.enemyBuffer.get(id)
+              if (buf) {
+                const sample = this.sampleBuffer(buf, renderTs)
+                if (sample) this.lerpOrSnap(enemy, sample.x, sample.y, 0.35)
               }
             })
           }
