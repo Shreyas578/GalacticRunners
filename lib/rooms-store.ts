@@ -1,3 +1,4 @@
+import { kv } from "@vercel/kv"
 
 export interface PlayerState {
     x: number
@@ -15,6 +16,7 @@ export interface EnemyState {
     y: number
     health: number
     type: 'enemy' | 'boss'
+    bossType?: string
 }
 
 export interface GameState {
@@ -37,15 +39,17 @@ export interface Room {
 
 /**
  * RoomsStore provides a centralized way to manage multiplayer room state.
- * It defaults to a global in-memory Map for local development.
- * In production (Vercel), you should replace the Map with a calls to Vercel KV or Redis.
+ * In production (Vercel), it uses Vercel KV (Redis).
+ * In development, it falls back to a global in-memory Map.
  */
 class RoomsStore {
     private static instance: RoomsStore;
     private memoryStore: Map<string, Room>;
+    private useKV: boolean;
 
     private constructor() {
-        // Use global to persist across hot reloads in Next.js development
+        this.useKV = process.env.NODE_ENV === 'production' && !!process.env.KV_REST_API_URL;
+        
         const globalRef = global as any;
         if (!globalRef.multiplayerRooms) {
             globalRef.multiplayerRooms = new Map<string, Room>();
@@ -60,19 +64,42 @@ class RoomsStore {
         return RoomsStore.instance;
     }
 
+    private normalizeId(id: string): string {
+        return `room:${id.toUpperCase()}`;
+    }
+
     public async getRoom(id: string): Promise<Room | undefined> {
+        const key = this.normalizeId(id);
+        if (this.useKV) {
+            return await kv.get<Room>(key) || undefined;
+        }
         return this.memoryStore.get(id.toUpperCase());
     }
 
     public async setRoom(id: string, room: Room): Promise<void> {
+        const key = this.normalizeId(id);
+        if (this.useKV) {
+            await kv.set(key, room, { ex: 3600 }); // Expire after 1 hour of inactivity
+            return;
+        }
         this.memoryStore.set(id.toUpperCase(), room);
     }
 
     public async deleteRoom(id: string): Promise<void> {
+        const key = this.normalizeId(id);
+        if (this.useKV) {
+            await kv.del(key);
+            return;
+        }
         this.memoryStore.delete(id.toUpperCase());
     }
 
     public async listRooms(): Promise<Room[]> {
+        if (this.useKV) {
+            const keys = await kv.keys('room:*');
+            if (keys.length === 0) return [];
+            return await kv.mget<Room[]>(...keys);
+        }
         return Array.from(this.memoryStore.values());
     }
 }

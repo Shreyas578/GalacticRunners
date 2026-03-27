@@ -198,7 +198,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         // ── Multiplayer sync ──────────────────────────────────────────
         private startMultiplayerSync() {
           // Use Phaser timers so they're cleaned up with the scene
-          this.time.addEvent({ delay: 50, loop: true, callback: () => {
+          // 100ms is safer for Vercel serverless to avoid request piling
+          this.time.addEvent({ delay: 100, loop: true, callback: () => {
             if (!this.isSyncing) {
               this.isSyncing = true
               Promise.all([this.syncPush(), this.syncPull()]).finally(() => {
@@ -450,8 +451,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             const tx = sprite.getData('targetX')
             const ty = sprite.getData('targetY')
             if (tx !== undefined && ty !== undefined) {
-              sprite.x = Phaser.Math.Linear(sprite.x, tx, 0.2)
-              sprite.y = Phaser.Math.Linear(sprite.y, ty, 0.2)
+              sprite.x = Phaser.Math.Linear(sprite.x, tx, 0.3)
+              sprite.y = Phaser.Math.Linear(sprite.y, ty, 0.3)
             }
           })
 
@@ -465,8 +466,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               const tx = enemy.getData('targetX')
               const ty = enemy.getData('targetY')
               if (tx !== undefined && ty !== undefined) {
-                enemy.x = Phaser.Math.Linear(enemy.x, tx, 0.2)
-                enemy.y = Phaser.Math.Linear(enemy.y, ty, 0.2)
+                enemy.x = Phaser.Math.Linear(enemy.x, tx, 0.3)
+                enemy.y = Phaser.Math.Linear(enemy.y, ty, 0.3)
               }
             })
           }
