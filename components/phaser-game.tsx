@@ -20,8 +20,6 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
   const gameRef = useRef<Phaser.Game | null>(null)
 
   useEffect(() => {
-    if (!gameContainerRef.current || gameRef.current) return
-
     let isMounted = true
     let cleanupResize: (() => void) | undefined
 
@@ -29,6 +27,14 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
       const Phaser = await import("phaser")
 
       if (!isMounted) return
+
+      // Recreate game when multiplayer params change (Vercel deploy needs this)
+      if (gameRef.current) {
+        try {
+          gameRef.current.destroy(true)
+        } catch { }
+        gameRef.current = null
+      }
 
       interface ShipStats {
         speed: number
@@ -80,6 +86,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         private remoteHealthBars: Map<string, { bg: Phaser.GameObjects.Rectangle, fill: Phaser.GameObjects.Rectangle }> = new Map()
         private ably?: Ably.Realtime
         private ablyChannel?: Ably.Types.RealtimeChannelPromise
+        private usingHttpFallback = false
         private lastNetSendAt = 0
         private bgMusic?: Phaser.Sound.BaseSound
 
@@ -203,11 +210,16 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (!this.roomId) return
 
           // Ably Realtime over WebSocket (works on Vercel; avoids HTTP polling latency)
-          this.ably = new Ably.Realtime.Promise({
-            authUrl: "/api/multiplayer/ably-token",
-            autoConnect: true,
-          })
-          this.ablyChannel = this.ably.channels.get(`room:${this.roomId}`)
+          try {
+            this.ably = new Ably.Realtime.Promise({
+              authUrl: "/api/multiplayer/ably-token",
+              autoConnect: true,
+            })
+            this.ablyChannel = this.ably.channels.get(`room:${this.roomId}`)
+          } catch {
+            this.startHttpFallback()
+            return
+          }
 
           // Receive state updates
           this.ablyChannel.subscribe("state", (msg) => {
@@ -255,6 +267,13 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             }
           })
 
+          // If we fail to connect quickly (missing ABLY_API_KEY / auth failing), fall back to HTTP sync
+          this.time.delayedCall(4000, () => {
+            if (this.usingHttpFallback) return
+            const state = this.ably?.connection?.state
+            if (state !== "connected") this.startHttpFallback()
+          })
+
           // Clean up stale remote pilots (no packets in 5s)
           this.time.addEvent({
             delay: 1000,
@@ -285,6 +304,110 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             callback: () => this.netSendTick(),
             callbackScope: this,
           })
+        }
+
+        private startHttpFallback() {
+          if (this.usingHttpFallback || !this.roomId) return
+          this.usingHttpFallback = true
+
+          // Fall back to much lower frequency to avoid serverless overload
+          this.time.addEvent({
+            delay: 250,
+            loop: true,
+            callback: () => {
+              if (!this.isSyncing) {
+                this.isSyncing = true
+                Promise.all([this.syncPushHttp(), this.syncPullHttp()]).finally(() => {
+                  this.isSyncing = false
+                })
+              }
+            },
+            callbackScope: this,
+          })
+        }
+
+        private async syncPushHttp() {
+          if (!this.player || !this.roomId) return
+          const enemies = this.isCreator ? this.serializeEnemies() : undefined
+          const wave = this.isCreator ? this.wave : undefined
+
+          const playerState = {
+            x: Math.round(this.player.x),
+            y: Math.round(this.player.y),
+            health: this.health,
+            score: this.score,
+            bullets: [...this.bulletsToSync],
+            shipType: this.selectedShip,
+          }
+          this.bulletsToSync = []
+
+          try {
+            await fetch("/api/multiplayer/rooms", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "SYNC_PUSH",
+                roomId: this.roomId,
+                playerAddress: this.account,
+                playerState,
+                enemies,
+                wave,
+                isGameOver: this.health <= 0,
+              }),
+            })
+          } catch { }
+        }
+
+        private async syncPullHttp() {
+          if (!this.roomId) return
+          try {
+            const res = await fetch("/api/multiplayer/rooms", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "SYNC_PULL", roomId: this.roomId, playerAddress: this.account }),
+            })
+            const data = await res.json()
+            if (!data.success) return
+
+            const { gameState } = data
+
+            if (gameState.isGameOver && this.health > 0) {
+              this.gameOver()
+              return
+            }
+
+            for (const [addr, ps] of Object.entries(gameState.playerStates as Record<string, any>)) {
+              if (addr === this.account) continue
+              if (!this.remoteSprites.has(addr)) {
+                const sprite = this.physics.add.sprite(ps.x, ps.y, `player_${ps.shipType || "viper"}`)
+                sprite.setDisplaySize(50, 50)
+                sprite.setAlpha(0.6)
+                sprite.setTint(0x00ffff)
+                sprite.setData("lastNetAt", Date.now())
+                this.remoteSprites.set(addr, sprite)
+              } else {
+                const sprite = this.remoteSprites.get(addr)!
+                sprite.setData("targetX", ps.x)
+                sprite.setData("targetY", ps.y)
+                sprite.setData("lastNetAt", Date.now())
+              }
+
+              this.updateRemoteHealthBar(addr, ps.x, ps.y, ps.health)
+
+              if (ps.bullets) {
+                ps.bullets.forEach((b: any) => {
+                  if (!this.spawnedBulletIds.has(b.id)) {
+                    this.spawnRemoteBullet(b.x, b.y)
+                    this.spawnedBulletIds.add(b.id)
+                  }
+                })
+              }
+            }
+
+            if (!this.isCreator && gameState.enemies) {
+              this.applyServerEnemies(gameState.enemies, gameState.wave)
+            }
+          } catch { }
         }
 
         private netSendTick() {
