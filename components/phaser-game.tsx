@@ -230,7 +230,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             if (data.sender === this.account) return
 
             // Collective Game Over
-            if (data.isGameOver && this.health > 0) {
+            if (data.isGameOver) {
               this.gameOver()
               return
             }
@@ -549,6 +549,20 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           bars.fill.setFillStyle(color)
         }
 
+        private lerpOrSnap(sprite: any, tx: number, ty: number, alpha: number) {
+          const dx = tx - sprite.x
+          const dy = ty - sprite.y
+          const distSq = dx * dx + dy * dy
+          // If packets arrive late (serverless jitter), snap to avoid rubber-banding
+          if (distSq > 160 * 160) {
+            sprite.x = tx
+            sprite.y = ty
+            return
+          }
+          sprite.x = Phaser.Math.Linear(sprite.x, tx, alpha)
+          sprite.y = Phaser.Math.Linear(sprite.y, ty, alpha)
+        }
+
         shutdown() {
           // Ably cleanup
           try {
@@ -594,8 +608,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             const tx = sprite.getData('targetX')
             const ty = sprite.getData('targetY')
             if (tx !== undefined && ty !== undefined) {
-              sprite.x = Phaser.Math.Linear(sprite.x, tx, 0.3)
-              sprite.y = Phaser.Math.Linear(sprite.y, ty, 0.3)
+              this.lerpOrSnap(sprite, tx, ty, 0.22)
             }
           })
 
@@ -609,8 +622,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               const tx = enemy.getData('targetX')
               const ty = enemy.getData('targetY')
               if (tx !== undefined && ty !== undefined) {
-                enemy.x = Phaser.Math.Linear(enemy.x, tx, 0.3)
-                enemy.y = Phaser.Math.Linear(enemy.y, ty, 0.3)
+                this.lerpOrSnap(enemy, tx, ty, 0.2)
               }
             })
           }
@@ -1339,16 +1351,33 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (this.isGameOverTriggered) return
           this.isGameOverTriggered = true
 
-          // Final broadcast to notify others
-          if (this.mode === "MULTIPLAYER" && this.ablyChannel && this.roomId) {
+          // Persist + broadcast authoritative game over so both clients end together.
+          if (this.mode === "MULTIPLAYER" && this.roomId) {
+            // Persist in KV/Redis (reliable even if a realtime packet is missed)
             try {
-              await this.ablyChannel.publish("state", {
-                roomId: this.roomId,
-                sender: this.account,
-                isGameOver: true,
-                ts: Date.now(),
+              await fetch("/api/multiplayer/rooms", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "SYNC_PUSH",
+                  roomId: this.roomId,
+                  playerAddress: this.account,
+                  isGameOver: true,
+                }),
               })
             } catch { }
+
+            // Realtime broadcast (fast path)
+            if (this.ablyChannel) {
+              try {
+                await this.ablyChannel.publish("state", {
+                  roomId: this.roomId,
+                  sender: this.account,
+                  isGameOver: true,
+                  ts: Date.now(),
+                })
+              } catch { }
+            }
           }
 
           if (this.bgMusic) this.bgMusic.stop()
