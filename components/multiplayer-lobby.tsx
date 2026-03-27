@@ -38,7 +38,7 @@ export function MultiplayerLobby({
 
         const poll = async () => {
             try {
-                const res = await fetch(`/api/multiplayer/rooms?roomId=${activeRoom.id}`)
+                const res = await fetch(`/api/multiplayer/rooms?roomId=${activeRoom.id}`, { cache: "no-store" })
                 const data = await res.json()
                 if (!data.success) return
 
@@ -56,7 +56,7 @@ export function MultiplayerLobby({
             }
         }
 
-        pollRef.current = setInterval(poll, 2000)
+        pollRef.current = setInterval(poll, 500)
         return () => { if (pollRef.current) clearInterval(pollRef.current) }
     }, [activeRoom?.id, account, onJoinRoom])
 

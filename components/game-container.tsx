@@ -38,6 +38,7 @@ export function GameContainer({ selectedShip, account, mode = "SOLO", playerCoun
   const [roomStatus, setRoomStatus] = useState<string>("PLAYING")
   const [roomCreator, setRoomCreator] = useState<string | null>(null)
   const [isReady, setIsReady] = useState(false)
+  const prevRoomStatusRef = useRef<string>("PLAYING")
   
   const { claimDrop } = useClaimBossDrop()
 
@@ -148,27 +149,29 @@ export function GameContainer({ selectedShip, account, mode = "SOLO", playerCoun
 
     const poll = async () => {
       try {
-        const res = await fetch(`/api/multiplayer/rooms?roomId=${roomId}`)
+        const res = await fetch(`/api/multiplayer/rooms?roomId=${roomId}`, { cache: "no-store" })
         const data = await res.json()
         if (data.success) {
+          const nextStatus = data.room.status
+          const prevStatus = prevRoomStatusRef.current
           setReadyPlayers(data.room.readyPlayers || [])
           setRoomPlayers(data.room.players || [])
-          setRoomStatus(data.room.status)
+          setRoomStatus(nextStatus)
           setRoomCreator(data.room.creator)
-          
+
           // Automatic restart when creator triggers it
-          // Only trigger if we were previously in GAMEOVER state to avoid accidental resets
-          if (data.room.status === "PLAYING" && roomStatus === "GAMEOVER") {
+          if (nextStatus === "PLAYING" && prevStatus === "GAMEOVER") {
             setGameOver(false)
             setIsReady(false)
             setFinalScore(0)
             setFinalWave(0)
           }
+          prevRoomStatusRef.current = nextStatus
         }
       } catch (e) {}
     }
 
-    const interval = setInterval(poll, 500)
+    const interval = setInterval(poll, 300)
     poll()
     return () => clearInterval(interval)
   }, [mode, roomId, gameOver])
@@ -196,6 +199,7 @@ export function GameContainer({ selectedShip, account, mode = "SOLO", playerCoun
       setIsReady(false)
       setFinalScore(0)
       setFinalWave(0)
+      prevRoomStatusRef.current = "PLAYING"
     } catch (e) {}
   }
 

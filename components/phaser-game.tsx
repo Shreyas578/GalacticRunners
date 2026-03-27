@@ -88,6 +88,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         private ablyChannel?: Ably.Types.RealtimeChannelPromise
         private usingHttpFallback = false
         private lastNetSendAt = 0
+        private lastEnemySnapshotAt = 0
         private bgMusic?: Phaser.Sound.BaseSound
 
         constructor(selectedShip: string, account: string, mode: "SOLO" | "MULTIPLAYER" = "SOLO", playerCount: number = 1, roomId: string = "", isCreator: boolean = false, onGameEnd?: (score: number, wave: number) => void) {
@@ -168,10 +169,11 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           this.input.keyboard!.on("keydown-SPACE", () => this.fireBullet(this.player))
 
 
-          if (this.bullets && this.enemies) {
+          const canAuthoritativeCombat = this.mode === "SOLO" || this.isCreator
+          if (canAuthoritativeCombat && this.bullets && this.enemies) {
             this.physics.add.overlap(this.bullets, this.enemies, this.hitEnemy as any, undefined, this)
           }
-          if (this.bullets && this.bosses) {
+          if (canAuthoritativeCombat && this.bullets && this.bosses) {
             this.physics.add.overlap(this.bullets, this.bosses, this.hitBoss as any, undefined, this)
           }
           
@@ -299,7 +301,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
 
           // Send state updates at ~15 Hz (good tradeoff: smooth + low bandwidth)
           this.time.addEvent({
-            delay: 66,
+            delay: 100,
             loop: true,
             callback: () => this.netSendTick(),
             callbackScope: this,
@@ -416,10 +418,15 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
 
           // Throttle if the game is running very fast
           const now = this.time.now
-          if (now - this.lastNetSendAt < 66) return
+          if (now - this.lastNetSendAt < 100) return
           this.lastNetSendAt = now
 
-          const enemies = this.isCreator ? this.serializeEnemies() : undefined
+          // Enemy snapshots are heavy; ship less often to reduce bandwidth jitter.
+          let enemies: any[] | undefined
+          if (this.isCreator && now - this.lastEnemySnapshotAt >= 200) {
+            enemies = this.serializeEnemies()
+            this.lastEnemySnapshotAt = now
+          }
           const wave = this.isCreator ? this.wave : undefined
 
           const playerState = {
@@ -610,9 +617,11 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
 
           this.cleanupProjectiles()
 
-          // All players run firing AI; only creator runs movement
-          this.updateEnemyBehavior()
-          this.updateBossBehavior()
+          // In multiplayer, creator remains authoritative for AI/combat to reduce divergence.
+          if (this.mode === "SOLO" || this.isCreator) {
+            this.updateEnemyBehavior()
+            this.updateBossBehavior()
+          }
 
           // Wave progression: Solo mode OR Creator in multiplayer
           const canProgress = this.mode === "SOLO" || this.isCreator
