@@ -515,6 +515,13 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           // 1. Remove local enemies that are no longer on server
           this.enemyMap.forEach((local, id) => {
             if (!serverIds.has(id)) {
+              // Cleanup health bar logic if it existed
+              const bars = this.remoteHealthBars.get(id)
+              if (bars) {
+                  bars.bg?.destroy()
+                  bars.fill?.destroy()
+                  this.remoteHealthBars.delete(id)
+              }
               local.destroy()
               this.enemyMap.delete(id)
               this.enemyBuffer.delete(id)
@@ -619,7 +626,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           } catch { }
           this.remoteSprites.forEach(s => s.destroy())
           this.remoteSprites.clear()
-          this.remoteHealthBars.forEach(b => { 
+          this.remoteHealthBars.forEach((b, id) => { 
             if (b.bg) b.bg.destroy(); 
             if (b.fill) b.fill.destroy() 
           })
@@ -682,9 +689,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                 const sample = this.sampleBuffer(buf, renderTs)
                 if (sample) {
                   this.lerpOrSnap(enemy, sample.x, sample.y, 0.45) 
-                  // Sync health bar for enemies/bosses
-                  const latest: any = buf[buf.length - 1]
-                  this.updateRemoteHealthBar(id, enemy.x, enemy.y, latest.health, latest.maxHealth || 30)
+                  // Removed enemy floating health bars as requested
                 }
               }
             })
@@ -692,11 +697,10 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
 
           this.cleanupProjectiles()
 
-          // In multiplayer, creator remains authoritative for AI/combat to reduce divergence.
-          if (this.mode === "SOLO" || this.isCreator) {
-            this.updateEnemyBehavior()
-            this.updateBossBehavior()
-          }
+          // Simulation for bullet hell/visuals on all clients; 
+          // (Internal logic gates movement/authority to the creator)
+          this.updateEnemyBehavior()
+          this.updateBossBehavior()
 
           // Wave progression: Solo mode OR Creator in multiplayer
           const canProgress = this.mode === "SOLO" || this.isCreator
