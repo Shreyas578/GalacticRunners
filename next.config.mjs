@@ -34,8 +34,10 @@ const nextConfig = {
     return config
   },
   experimental: {
-    turbopack: {},
+    // Ensuring fallback for any experimental features
   },
+  // Silence Turbopack warning as we use Webpack for Phaser fallbacks
+  turbopack: {},
 }
 
 export default nextConfig
