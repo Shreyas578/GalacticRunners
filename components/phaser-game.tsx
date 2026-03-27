@@ -88,7 +88,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         private enemyBuffer: Map<string, { ts: number; x: number; y: number; health: number; type: "enemy" | "boss"; bossType?: string }[]> = new Map()
         private readonly interpDelayMs = 150
         private ably?: Ably.Realtime
-        private ablyChannel?: Ably.Types.RealtimeChannelPromise
+        private ablyChannel?: any // Using any to avoid complex type issues with Ably 2.x for now
         private usingHttpFallback = false
         private lastNetSendAt = 0
         private lastEnemySnapshotAt = 0
@@ -214,9 +214,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
         private startMultiplayerRealtime() {
           if (!this.roomId) return
 
-          // Ably Realtime over WebSocket (works on Vercel; avoids HTTP polling latency)
           try {
-            this.ably = new Ably.Realtime.Promise({
+            this.ably = new Ably.Realtime({
               authUrl: "/api/multiplayer/ably-token",
               autoConnect: true,
             })
@@ -227,7 +226,7 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           }
 
           // Receive state updates
-          this.ablyChannel.subscribe("state", (msg) => {
+          this.ablyChannel.subscribe("state", (msg: any) => {
             const data: any = msg.data
             if (!data || data.roomId !== this.roomId) return
             if (data.sender === this.account) return
@@ -264,8 +263,6 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                 buf.sort((a, b) => a.ts - b.ts)
               }
               this.remotePlayerBuffer.set(addr, buf)
-
-              this.updateRemoteHealthBar(addr, ps.x, ps.y, ps.health)
 
               if (ps.bullets) {
                 ps.bullets.forEach((b: any) => {
@@ -314,9 +311,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             callbackScope: this,
           })
 
-          // Send state updates at ~15 Hz (good tradeoff: smooth + low bandwidth)
+          // Send state updates at ~20 Hz (Increased for better responsiveness)
           this.time.addEvent({
-            delay: 100,
+            delay: 50,
             loop: true,
             callback: () => this.netSendTick(),
             callbackScope: this,
@@ -437,9 +434,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (now - this.lastNetSendAt < 100) return
           this.lastNetSendAt = now
 
-          // Enemy snapshots are heavy; ship less often to reduce bandwidth jitter.
+          // Enemy snapshots are heavy; ship less often than player updates but faster than before (10 Hz)
           let enemies: any[] | undefined
-          if (this.isCreator && now - this.lastEnemySnapshotAt >= 200) {
+          if (this.isCreator && now - this.lastEnemySnapshotAt >= 100) {
             enemies = this.serializeEnemies()
             this.lastEnemySnapshotAt = now
           }
@@ -479,12 +476,12 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           if (this.enemies) {
             this.enemies.getChildren().forEach((e: any) => {
               if (e.active) {
+                // Round coordinates to reduce packet size string representation
                 result.push({ 
                   id: this.getEnemyId(e), 
                   x: Math.round(e.x), 
                   y: Math.round(e.y), 
-                  health: e.getData('health') || 30, 
-                  type: 'enemy' 
+                  h: e.getData('health') || 30 // Shortened key 'h' for health
                 })
               }
             })
@@ -496,9 +493,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                   id: this.getEnemyId(b), 
                   x: Math.round(b.x), 
                   y: Math.round(b.y), 
-                  health: b.getData('health') || 300, 
-                  type: 'boss',
-                  bossType: b.getData('bossType')
+                  h: b.getData('health') || 300, 
+                  t: 'boss', // Shortened key 't' for type
+                  bt: b.getData('bossType') // Shortened key 'bt' for bossType
                 })
               }
             })
@@ -530,10 +527,11 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             
             if (!local) {
               // Spawn new replica
-              if (se.type === 'boss') {
-                local = this.bosses!.create(se.x, se.y, `boss_${se.bossType}`)
+              const type = se.t || 'enemy'
+              if (type === 'boss') {
+                local = this.bosses!.create(se.x, se.y, `boss_${se.bt}`)
                 local.setDisplaySize(150, 150)
-                local.setData('bossType', se.bossType)
+                local.setData('bossType', se.bt)
               } else {
                 local = this.enemies!.create(se.x, se.y, 'enemy')
                 local.setDisplaySize(40, 40)
@@ -542,10 +540,11 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               this.enemyMap.set(se.id, local)
             }
 
-            local.setData('health', se.health)
+            const health = se.h || 0
+            local.setData('health', health)
 
             const buf = this.enemyBuffer.get(se.id) || []
-            buf.push({ ts, x: se.x, y: se.y, health: se.health, type: se.type, bossType: se.bossType })
+            buf.push({ ts, x: se.x, y: se.y, health: health, type: se.t || 'enemy', bossType: se.bt })
             const cutoff = ts - 2000
             while (buf.length > 0 && buf[0].ts < cutoff) buf.shift()
             if (buf.length > 1 && buf[buf.length - 2].ts > buf[buf.length - 1].ts) {
@@ -593,12 +592,16 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           const dx = tx - sprite.x
           const dy = ty - sprite.y
           const distSq = dx * dx + dy * dy
-          // If packets arrive late (serverless jitter), snap to avoid rubber-banding
-          if (distSq > 160 * 160) {
+          
+          // If packets arrive very late or we're too far, snap to avoid long rubber-banding
+          if (distSq > 250 * 250) {
             sprite.x = tx
             sprite.y = ty
             return
           }
+          
+          // Frame-rate independent lerp approach
+          // Using a consistent alpha for smoothing
           sprite.x = Phaser.Math.Linear(sprite.x, tx, alpha)
           sprite.y = Phaser.Math.Linear(sprite.y, ty, alpha)
         }
@@ -651,7 +654,12 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             const buf = this.remotePlayerBuffer.get(addr)
             if (buf) {
               const sample = this.sampleBuffer(buf, renderTs)
-              if (sample) this.lerpOrSnap(sprite, sample.x, sample.y, 0.35)
+              if (sample) {
+                this.lerpOrSnap(sprite, sample.x, sample.y, 0.35)
+                // Sync health bar with interpolated position
+                const health = buf[buf.length - 1].health
+                this.updateRemoteHealthBar(addr, sprite.x, sprite.y, health)
+              }
             }
           })
 
@@ -666,7 +674,9 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
               const buf = this.enemyBuffer.get(id)
               if (buf) {
                 const sample = this.sampleBuffer(buf, renderTs)
-                if (sample) this.lerpOrSnap(enemy, sample.x, sample.y, 0.35)
+                if (sample) {
+                  this.lerpOrSnap(enemy, sample.x, sample.y, 0.45) // Slightly faster lerp for enemies
+                }
               }
             })
           }
@@ -1269,6 +1279,12 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             this.events.emit("updateScore", this.score)
 
             this.submitBossVictory(boss.getData("bossType"))
+
+            // Game Logic Improvement: Repair ship after boss fight
+            if (this.shipStats) {
+              this.health = Math.min(this.health + 50, this.shipStats.maxHealth)
+              this.events.emit("updateHealth", this.health, this.shipStats.maxHealth)
+            }
           } else {
             boss.setData("health", bossHealth)
             boss.setTint(0xffffff)
@@ -1354,6 +1370,13 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           this.wave++
           this.waveEnemyCount += 1
           this.events.emit("updateWave", this.wave)
+
+          // Game Logic Improvement: Slight repair after wave clear
+          if (this.shipStats) {
+            this.health = Math.min(this.health + 10, this.shipStats.maxHealth)
+            this.events.emit("updateHealth", this.health, this.shipStats.maxHealth)
+          }
+
           // Only creator spawns new enemies
           if (this.mode !== "MULTIPLAYER" || this.isCreator) {
             this.spawnWave()
