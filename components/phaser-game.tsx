@@ -990,6 +990,27 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
           })
         }
 
+        private getClosestPlayer(x: number, y: number): { x: number, y: number } {
+          // Default to local player
+          let closest = { x: this.player?.x || x, y: this.player?.y || y }
+          let minDistSq = Infinity
+          
+          if (this.player && this.player.active) {
+            minDistSq = Phaser.Math.Distance.Squared(x, y, this.player.x, this.player.y)
+          }
+
+          this.remoteSprites.forEach((sprite) => {
+            if (sprite.active) {
+              const distSq = Phaser.Math.Distance.Squared(x, y, sprite.x, sprite.y)
+              if (distSq < minDistSq) {
+                minDistSq = distSq
+                closest = { x: sprite.x, y: sprite.y }
+              }
+            }
+          })
+          return closest
+        }
+
         private updateEnemyBehavior() {
           if (!this.enemies || !this.player) return
 
@@ -997,14 +1018,17 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
             // Movement: Solo mode OR Creator in multiplayer
             const canMove = this.mode === "SOLO" || this.isCreator
             if (canMove && Math.random() < 0.02) {
-              const angle = Phaser.Math.Angle.Between(enemy.x, enemy.y, this.player!.x, this.player!.y)
+              const target = this.getClosestPlayer(enemy.x, enemy.y)
+              const angle = Phaser.Math.Angle.Between(enemy.x, enemy.y, target.x, target.y)
               enemy.setVelocity(Math.cos(angle) * 50, Math.sin(angle) * 50)
             }
 
             // Firing: Simulation on ALL clients ensures players see projectiles and take damage locally
             if (this.enemyBullets && Math.random() < 0.015) { // Increased fire rate
               const bullet = this.enemyBullets.create(enemy.x, enemy.y + 20, "enemyBullet")
-              bullet.setVelocityY(400) // Much faster
+              const target = this.getClosestPlayer(enemy.x, enemy.y)
+              const angle = Phaser.Math.Angle.Between(enemy.x, enemy.y, target.x, target.y)
+              this.physics.moveTo(bullet, target.x, target.y, 400) // Aim at closest player
               bullet.setDisplaySize(8, 8)
               this.tweens.add({
                 targets: bullet,
@@ -1148,7 +1172,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                 }
               } else if (bossType === "NEBULA_TYRANT") {
                 // Target player
-                const angle = Phaser.Math.Angle.Between(boss.x, boss.y, this.player!.x, this.player!.y)
+                const target = this.getClosestPlayer(boss.x, boss.y)
+                const angle = Phaser.Math.Angle.Between(boss.x, boss.y, target.x, target.y)
                 for (let i = -1; i <= 1; i++) {
                   const bullet = this.enemyBullets!.create(boss.x, boss.y, "enemyBullet")
                   const spread = i * 0.2
@@ -1172,7 +1197,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                 const bullet = this.enemyBullets!.create(boss.x, boss.y, "enemyBullet")
                 bullet.setDisplaySize(35, 35) // Even larger bullet
                 bullet.setTint(0xff0000)
-                this.physics.moveToObject(bullet, this.player!, 600) // Extreme speed
+                const target = this.getClosestPlayer(boss.x, boss.y)
+                this.physics.moveTo(bullet, target.x, target.y, 600) // Extreme speed
               } else if (bossType === "HARBINGER_OF_DOOM") {
                 // Spiral pattern - More dense
                 for (let i = 0; i < 24; i++) { // More bullets
@@ -1210,9 +1236,8 @@ export function PhaserGame({ selectedShip, account, mode = "SOLO", playerCount =
                     }
                     this.tweens.add({ targets: boss, alpha: 1, duration: 150 })
                     const bullet = this.enemyBullets!.create(boss.x, boss.y, "enemyBullet")
-                    if (this.player && this.player.active) {
-                        this.physics.moveToObject(bullet, this.player!, 800)
-                    }
+                    const target = this.getClosestPlayer(boss.x, boss.y)
+                    this.physics.moveTo(bullet, target.x, target.y, 800)
                   }
                 })
               }
